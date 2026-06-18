@@ -1,0 +1,18 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+uploads/
+
+# Test results (QA reports, cycle outputs)
+test-results/
+
+# Dev / QA scripts + artifacts (not for deploy; may contain candidate/JD data)
+test_fixes.py
+test_full_comparison.py
+test_jd_parser.py
+test_qa_comparison.py
+generate_comparison_excel.py
+*.xlsx
+qa_jd_results.json

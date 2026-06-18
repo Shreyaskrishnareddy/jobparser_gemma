@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: jobparser-gemma
+    runtime: python
+    pythonVersion: "3.11.12"
+    buildCommand: pip install -r requirements.txt
+    # One process + threads (gthread): keeps /health responsive while a 2-4 min
+    # parse runs. --timeout 600 because Gemma 4 (free tier) is slow per JD.
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 8 --timeout 600
+    envVars:
+      # Gemma 4 via Google AI Studio. Free key: aistudio.google.com/apikey
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: GOOGLE_MODEL
+        value: gemma-4-31b-it
+      - key: GOOGLE_TIMEOUT
+        value: "300"
+      - key: LLM_MAX_RETRIES
+        value: "4"
+      - key: PYTHON_VERSION
+        value: "3.11.12"
+    healthCheckPath: /health
