@@ -99,7 +99,7 @@ FIELD-BY-FIELD INSTRUCTIONS:
 10. experience_years — Object or null: {"min_years": number, "max_years": number, "requirement_type": "required"|"preferred"}
     Look for patterns like "X years of experience", "X+ years", "X-Y years". If only one number given (e.g., "8 years"), use it as both min and max.
 
-11. benefits — Array of PLAIN STRINGS like ["health insurance", "401k", "bonus"]. ONLY include benefits that are explicitly named in the text. If the JD says something vague like "as per agreement" or "standard benefits", return []. Do NOT invent specific benefits.
+11. benefits — Array of PLAIN STRINGS. Capture EVERY benefit statement explicitly written in the text, INCLUDING vague ones — copy the stated phrase verbatim (e.g. "As per contract (C2C – vendor)", "As per company policy", "Standard benefits", "Benefits as per agreement"). Do NOT INVENT specific benefits like "health insurance" or "401k" that are not written in the text. Return [] only if no benefits statement appears at all.
 
 12. work_authorization — String or null. Include residency or location restrictions like "LOCAL ONLY", "must reside in...", "US citizens only", "work permit required", etc.
 
@@ -839,6 +839,18 @@ def _post_process(parsed, original_text=""):
         pass
 
     try:
+        _fix_skill_quality(parsed, original_text)
+        applied.append("skill_quality")
+    except Exception:
+        pass
+
+    try:
+        _fix_title_cleanup(parsed)
+        applied.append("title_cleanup")
+    except Exception:
+        pass
+
+    try:
         _fix_soft_skills_hallucination(parsed, original_text)
         applied.append("soft_skills_validation")
     except Exception:
@@ -965,6 +977,71 @@ def _fix_derive_skill_splits(parsed):
             s["name"] for s in skills
             if isinstance(s, dict) and s.get("category") == "soft_skill"
         ]
+
+
+_CERT_IN_SKILL = re.compile(
+    r'\b(ccie|ccde|ccna|ccnp|pmp|pmi-acp|cissp|cisa|cism|comptia|itil|prince2|'
+    r'togaf|safe\s|six sigma|certified|certification)\b', re.IGNORECASE)
+# Gerunds that signal a responsibility phrase wrongly captured as a "skill".
+_ACTIVITY_GERUNDS = {
+    "gathering", "developing", "designing", "leading", "executing", "working",
+    "facilitating", "communicating", "performing", "managing", "implementing",
+    "building", "creating", "maintaining", "supporting", "providing", "analyzing",
+    "coordinating", "conducting", "ensuring", "delivering", "administering",
+    "documenting", "troubleshooting", "collaborating", "overseeing", "preparing",
+}
+
+
+def _is_pseudo_skill(name):
+    """True if a 'skill' is actually a responsibility/activity phrase."""
+    n = str(name).strip().lower()
+    words = n.split()
+    if len(words) > 6:
+        return True
+    if len(words) >= 2 and words[0] in _ACTIVITY_GERUNDS:
+        return True
+    return False
+
+
+def _fix_skill_quality(parsed, original_text=""):
+    """Keep certifications and responsibility phrases OUT of the skill fields.
+
+    JDs that list requirements as "10 Years of Experience in <activity>" cause
+    activity phrases to be captured as skills; certifications (CCIE, PMP, ...)
+    also leak in. Certs belong only in `certifications`; skills should be clean
+    technology/competency names.
+    """
+    def clean(lst):
+        out = []
+        for s in lst:
+            name = s.get("name") if isinstance(s, dict) else s
+            if not isinstance(name, str) or not name.strip():
+                continue
+            if _CERT_IN_SKILL.search(name):
+                continue
+            if _is_pseudo_skill(name):
+                continue
+            out.append(s)
+        return out
+
+    for key in ("skills", "technical_skills"):
+        if isinstance(parsed.get(key), list):
+            parsed[key] = clean(parsed[key])
+
+
+def _fix_title_cleanup(parsed):
+    """Trim trailing certification cruft from the job title (keeps real qualifiers)."""
+    title = parsed.get("title")
+    if not isinstance(title, dict):
+        return
+    text = title.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return
+    cleaned = re.sub(
+        r'\s*[\-–]?\s*\([^)]*\b(?:CCIE|CCDE|CCNA|CCNP|PMP|PMI-ACP|CISSP|CISA|CISM|certified)\b[^)]*\)\s*$',
+        '', text.strip(), flags=re.IGNORECASE).rstrip(' -–').strip()
+    if cleaned and len(cleaned) >= 3:
+        title["text"] = cleaned
 
 
 def _fix_employment_type(parsed, original_text=""):
@@ -1181,12 +1258,12 @@ def _fix_soft_skills_from_text(parsed, original_text=""):
 
     # Canonical skills to scan for
     _SCAN_SKILLS = [
-        ("Communication", ["communication", "communicate"]),
-        ("Leadership", ["leadership"]),
+        ("Communication", ["communicat"]),
+        ("Leadership", ["leadership", "lead a team", "lead the team", "team lead", "leading a team"]),
         ("Teamwork", ["teamwork"]),
         ("Problem Solving", ["problem-solving", "problem solving"]),
         ("Analytical", ["analytical"]),
-        ("Collaboration", ["collaboration", "collaborate", "collaborative"]),
+        ("Collaboration", ["collaborat"]),
         ("Presentation", ["presentation skills"]),
         ("Negotiation", ["negotiation"]),
         ("Mentoring", ["mentoring"]),
@@ -1244,12 +1321,35 @@ def _fix_soft_skills_from_text(parsed, original_text=""):
 
 
 def _fix_benefits_hallucination(parsed, original_text=""):
-    """Remove benefits that don't actually appear in the original JD text."""
+    """Remove benefits that don't actually appear in the original JD text.
+
+    Grounding is dash/whitespace-tolerant so stated-but-vague benefits like
+    "As per contract (C2C - vendor)" survive even if the model normalized an
+    en-dash or spacing.
+    """
     benefits = parsed.get("benefits")
     if not isinstance(benefits, list) or not original_text:
         return
-    lower_text = original_text.lower()
-    validated = [b for b in benefits if isinstance(b, str) and b.lower() in lower_text]
+
+    def norm(s):
+        s = str(s).lower()
+        for d in ("–", "—", "−"):
+            s = s.replace(d, "-")
+        return re.sub(r"\s+", " ", s).strip()
+
+    norm_text = norm(original_text)
+    validated = []
+    for b in benefits:
+        if not isinstance(b, str) or not b.strip():
+            continue
+        nb = norm(b)
+        if nb in norm_text:
+            validated.append(b)
+        else:
+            # keep if most significant words are present (tolerates light reformatting)
+            words = [w for w in re.split(r"[^a-z0-9]+", nb) if len(w) > 2]
+            if words and sum(1 for w in words if w in norm_text) / len(words) >= 0.7:
+                validated.append(b)
     parsed["benefits"] = validated
 
 
@@ -1315,30 +1415,44 @@ def _fix_location_consistency(parsed):
                 loc["country"] = parts[-1]
 
 
+def _looks_like_client_id(s):
+    """True if a string is a bare requisition/client ID (e.g. '5471126BA2', 'DAG2610')."""
+    s = (s or "").strip()
+    if not s or " " in s:
+        return False
+    return s.isdigit() or bool(re.match(r'^[A-Za-z0-9]{4,20}$', s) and re.search(r'\d', s))
+
+
 def _fix_company_is_id(parsed, original_text=""):
-    """If company is a numeric/short alphanumeric ID, move it to job_id and null out company."""
+    """Normalize the company field around staffing 'Client:' references.
+
+    - "Client: Austin Energy" / "DAG2605-Austin Energy" -> company "Austin Energy".
+    - A bare client ID with no real company name -> keep it VISIBLE as
+      "Client: <ID>" (so the staffing client isn't lost) and also store the ID
+      in job_id. Recovers the ID from the text when company came back empty.
+    """
     company = parsed.get("company")
-    if not isinstance(company, str):
-        return
-    clean = company.strip()
-    # Remove "Client:" prefix if present
+    clean = company.strip() if isinstance(company, str) else ""
     if clean.lower().startswith("client:"):
         clean = clean[7:].strip()
-        parsed["company"] = clean
 
-    # Check if it looks like an ID rather than a company name
-    is_id = False
-    # Pure digits
-    if clean.isdigit():
-        is_id = True
-    # Short alphanumeric with no spaces and contains digits (e.g., "17783PSA3", "537601527", "DAG2610")
-    elif re.match(r'^[A-Za-z0-9]{4,20}$', clean) and re.search(r'\d', clean) and " " not in clean:
-        is_id = True
-
-    if is_id:
+    if _looks_like_client_id(clean):
         if not parsed.get("job_id"):
             parsed["job_id"] = clean
-        parsed["company"] = None
+        parsed["company"] = f"Client: {clean}"
+        return
+
+    if clean:
+        parsed["company"] = clean  # real company name (any "Client:" prefix stripped)
+        return
+
+    # company empty -> recover a bare "Client: <ID>" from the text if present.
+    m = re.search(r'client\s*:\s*\(?\s*([A-Za-z0-9][A-Za-z0-9]{3,19})\s*\)?', original_text or "", re.IGNORECASE)
+    if m and _looks_like_client_id(m.group(1)):
+        cid = m.group(1).strip()
+        if not parsed.get("job_id"):
+            parsed["job_id"] = cid
+        parsed["company"] = f"Client: {cid}"
 
 
 def _fix_job_id_validation(parsed, original_text=""):
@@ -1369,31 +1483,42 @@ def _fix_education_format(parsed, original_text=""):
 
 
 def _fix_experience_from_text(parsed, original_text=""):
-    """If experience_years is missing, try to extract from text."""
-    if parsed.get("experience_years"):
-        return
+    """Set/repair experience_years from the text.
+
+    When a JD lists several "N Years of Experience in ..." requirements (common
+    in government/staffing JDs), span the overall min..max across all of them —
+    so "10 Years... / 8 Years..." becomes 8-10, not 10-10.
+    """
     if not original_text:
         return
-    # Look for "X+ years", "X-Y years", "X years" patterns
-    patterns = [
-        r'(\d+)\s*[\-–to]+\s*(\d+)\s*(?:\+\s*)?years?\s+(?:of\s+)?experience',
-        r'(\d+)\s*\+?\s*years?\s+(?:of\s+)?experience',
-        r'minimum\s+(?:of\s+)?(\d+)\s*years',
-    ]
-    for pat in patterns:
-        match = re.search(pat, original_text, re.IGNORECASE)
-        if match:
-            groups = match.groups()
-            if len(groups) == 2:
-                mn, mx = int(groups[0]), int(groups[1])
-            else:
-                mn = mx = int(groups[0])
-            parsed["experience_years"] = {
-                "min_years": mn,
-                "max_years": mx,
-                "requirement_type": "required",
-            }
-            return
+
+    # Explicit range wins: "4-7 years of experience"
+    rng = re.search(r'(\d+)\s*[\-–to]+\s*(\d+)\s*(?:\+\s*)?years?\s+(?:of\s+)?experience',
+                    original_text, re.IGNORECASE)
+    if rng:
+        mn, mx = int(rng.group(1)), int(rng.group(2))
+        parsed["experience_years"] = {"min_years": mn, "max_years": mx, "requirement_type": "required"}
+        return
+
+    # Otherwise collect every "N years of experience" figure and span them.
+    years = [int(m) for m in re.findall(r'(\d+)\s*\+?\s*years?\s+(?:of\s+)?experience',
+                                        original_text, re.IGNORECASE)]
+    if not years:
+        ex = parsed.get("experience_years")
+        if not ex:
+            m = re.search(r'minimum\s+(?:of\s+)?(\d+)\s*years', original_text, re.IGNORECASE)
+            if m:
+                n = int(m.group(1))
+                parsed["experience_years"] = {"min_years": n, "max_years": n, "requirement_type": "required"}
+        return
+
+    mn, mx = min(years), max(years)
+    ex = parsed.get("experience_years")
+    if not ex or not isinstance(ex, dict):
+        parsed["experience_years"] = {"min_years": mn, "max_years": mx, "requirement_type": "required"}
+    elif mn != mx and ex.get("min_years") == ex.get("max_years"):
+        # model gave a single value but the JD has a real spread -> widen it
+        ex["min_years"], ex["max_years"] = mn, mx
 
 
 def _fix_job_id_from_client(parsed, original_text=""):

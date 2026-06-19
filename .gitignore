@@ -16,3 +16,7 @@ test_qa_comparison.py
 generate_comparison_excel.py
 *.xlsx
 qa_jd_results.json
+cmp1.py
+compare_jd.py
+score_jd.py
+qa_jd_parse.py

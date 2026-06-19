@@ -90,6 +90,35 @@
             background: #fef2f2; border: 1px solid #fecaca; border-radius: 10px;
             padding: 16px; color: #dc2626; display: none; margin-top: 20px;
         }
+        /* Engineering metadata bar */
+        .metabar {
+            display: flex; flex-wrap: wrap; gap: 18px; background: #f8fafc; border: 1px solid #e2e8f0;
+            border-radius: 10px; padding: 12px 18px; margin-bottom: 18px;
+            font-family: 'SF Mono', ui-monospace, monospace; font-size: 0.82rem;
+        }
+        .metabar .m-label { color: #94a3b8; }
+        .metabar .m-val { color: #334155; }
+        .metabar .m-val.accent { color: #2563eb; }
+        .metabar .m-val.ok { color: #16a34a; }
+        .subtabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+        .subtab {
+            padding: 7px 16px; cursor: pointer; color: #64748b; font-size: 0.88rem; font-weight: 600;
+            background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 7px; transition: all 0.15s;
+        }
+        .subtab:hover { color: #334155; border-color: #cbd5e1; }
+        .subtab.active { color: #ffffff; background: #2563eb; border-color: #2563eb; }
+        .subpane { display: none; }
+        .subpane.active { display: block; }
+        .copy-btn {
+            background: #f1f5f9; border: 1px solid #e2e8f0; color: #475569; padding: 6px 14px;
+            border-radius: 6px; cursor: pointer; font-size: 0.82rem; float: right; margin-bottom: 8px;
+        }
+        .copy-btn:hover { border-color: #2563eb; color: #2563eb; }
+        .code-block {
+            background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px;
+            overflow: auto; font-family: 'SF Mono', ui-monospace, monospace; font-size: 0.82rem;
+            color: #1e293b; max-height: 560px; white-space: pre; clear: both;
+        }
     </style>
 </head>
 <body>
@@ -118,13 +147,22 @@
         <div class="result" id="result">
             <div class="result-header">
                 <h2 id="resultFilename">Results</h2>
-                <div>
-                    <span class="meta"><span id="resultTime">0</span>ms</span>
-                    <button class="json-toggle" onclick="toggleJson()">JSON</button>
-                </div>
             </div>
-            <div id="sections"></div>
-            <div class="json-view" id="jsonView"><pre id="jsonContent"></pre></div>
+
+            <div class="metabar" id="metabar"></div>
+
+            <div class="subtabs">
+                <div class="subtab active" onclick="switchPane('structured', this)">Structured</div>
+                <div class="subtab" onclick="switchPane('json', this)">JSON</div>
+            </div>
+
+            <div class="subpane active" id="pane-structured">
+                <div id="sections"></div>
+            </div>
+            <div class="subpane" id="pane-json">
+                <button class="copy-btn" onclick="copyText('jsonContent', this)">Copy JSON</button>
+                <pre class="code-block" id="jsonContent"></pre>
+            </div>
         </div>
     </div>
 
@@ -197,8 +235,18 @@
             const meta = r._metadata || {};
 
             document.getElementById('resultFilename').textContent = data.filename || 'Results';
-            document.getElementById('resultTime').textContent = meta.processing_time_ms || data.processing_time_ms || 0;
             document.getElementById('jsonContent').textContent = JSON.stringify(r, null, 2);
+
+            const secs = ((meta.processing_time_ms || data.processing_time_ms || 0) / 1000).toFixed(1);
+            const conf = r.global_confidence != null ? Math.round(r.global_confidence * 100) + '%' : '–';
+            document.getElementById('metabar').innerHTML = [
+                metaItem('model', meta.model || 'gemma-4-31b-it', 'accent'),
+                metaItem('confidence', conf, 'ok'),
+                metaItem('time', secs + 's', ''),
+                metaItem('prompt_tok', meta.prompt_tokens != null ? meta.prompt_tokens : '–', ''),
+                metaItem('output_tok', meta.completion_tokens != null ? meta.completion_tokens : '–', ''),
+            ].join('');
+            switchPaneById('structured');
 
             const s = document.getElementById('sections');
             s.innerHTML = '';
@@ -374,9 +422,24 @@
             d.textContent = String(s);
             return d.innerHTML;
         }
-        function toggleJson() {
-            const v = document.getElementById('jsonView');
-            v.style.display = v.style.display === 'none' ? 'block' : 'none';
+        function metaItem(label, val, cls) {
+            return '<div><span class="m-label">' + label + ':</span> <span class="m-val ' + cls + '">' + esc(val) + '</span></div>';
+        }
+        function switchPane(name, el) {
+            document.querySelectorAll('.subtab').forEach(t => t.classList.remove('active'));
+            if (el) el.classList.add('active');
+            switchPaneById(name);
+        }
+        function switchPaneById(name) {
+            document.querySelectorAll('.subpane').forEach(p => p.classList.remove('active'));
+            const pane = document.getElementById('pane-' + name);
+            if (pane) pane.classList.add('active');
+        }
+        function copyText(id, btn) {
+            navigator.clipboard.writeText(document.getElementById(id).textContent).then(() => {
+                const old = btn.textContent; btn.textContent = 'Copied ✓';
+                setTimeout(() => btn.textContent = old, 1400);
+            });
         }
     </script>
 </body>
